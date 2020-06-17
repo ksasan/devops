@@ -1,0 +1,689 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  AWS CloudFormation Template TieredInfra-pg-MultiAZ: Create a highly available,
+  scalable Tiered infra stack with an Amazon RDS database instance for
+  the backend data store.
+  This template uses the AWS CloudFormation bootstrap scripts to install the packages
+  and files necessary to deploy the node.js app to server at instance launch time.
+  It creates one or more Amazon EC2 instances, an Application Load Balancer and
+  an Amazon RDS DB instance.
+  Values have been picked up for demo purpose, and a real production environment needs
+  to choose them based upon specific needs (like load, scalability, response time need)
+Parameters:
+  EnvironmentName:
+    Description: Use this as Prefix to manage Resources
+    Type: String
+
+  VpcCIDR:
+    Description: IP range for this VPC
+    Type: String
+    Default: 10.0.0.0/16
+
+  PublicSubnet1CIDR:
+    Description: IP range for Public Subnet 1
+    Type: String
+    Default: 10.0.1.0/24
+
+  PublicSubnet2CIDR:
+    Description: IP range for Public Subnet 2
+    Type: String
+    Default: 10.0.2.0/24
+
+  PrivateSubnet1CIDR:
+    Description: IP range for Private Subnet 1
+    Type: String
+    Default: 10.0.3.0/24
+
+  PrivateSubnet2CIDR:
+    Description: IP range for Private Subnet 2
+    Type: String
+    Default: 10.0.4.0/24
+
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instances
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: Must be the name of an existing EC2 KeyPair.
+
+  DBName:
+    Default: nodeappPgDb
+    Description: Postgres database name
+    Type: String
+    MinLength: '1'
+    MaxLength: '64'
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric characters.
+  DBUser:
+    NoEcho: 'true'
+    Default: nodeappuser
+    Description: Username for Postgres database access
+    Type: String
+    MinLength: '1'
+    MaxLength: '16'
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric characters.
+  DBPassword:
+    NoEcho: 'true'
+    Description: Password for Postgres database access
+    Type: String
+    MinLength: '8'
+    MaxLength: '41'
+    AllowedPattern: '[a-zA-Z0-9]*'
+    ConstraintDescription: must contain only alphanumeric characters.
+  DBAllocatedStorage:
+    Default: '5'
+    Description: The size of the database (Gb)
+    Type: Number
+    MinValue: '5'
+    MaxValue: '1024'
+    ConstraintDescription: must be between 5 and 1024Gb.
+  DBInstanceClass:
+    Description: The database instance type
+    Type: String
+    Default: db.t2.small
+    AllowedValues:
+      - db.t2.micro
+      - db.t2.small
+    ConstraintDescription: must select a valid database instance type.
+  MultiAZDatabase:
+    Default: 'true'
+    Description: Create a Multi-AZ Postgres Amazon RDS database instance
+    Type: String
+    AllowedValues:
+      - 'true'
+      - 'false'
+    ConstraintDescription: must be either true or false.
+
+  WebServerCapacity:
+    Default: 1
+    Description: The initial number of WebServer instances
+    Type: Number
+    MinValue: 1
+    MaxValue: 5
+    ConstraintDescription: Must be between 1 and 5 EC2 instances.
+
+  InstanceType:
+    Description: WebServer EC2 instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t2.micro
+      - t2.small
+    ConstraintDescription: Must be a valid EC2 instance type.
+
+  SSHLocation:
+    Description: The IP address range that can be used to SSH to the EC2 instances
+    Type: String
+    MinLength: 9
+    MaxLength: 18
+    Default: 0.0.0.0/0
+    AllowedPattern: '(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})'
+    ConstraintDescription: Must be a valid IP CIDR range of the form x.x.x.x/x.
+
+Mappings:
+  AWSInstanceType2Arch:
+    t2.micro:
+      Arch: HVM64
+    t2.small:
+      Arch: HVM64
+
+  AWSInstanceType2NATArch:
+    t2.micro:
+      Arch: NATHVM64
+    t2.small:
+      Arch: NATHVM64
+
+  AWSRegionArch2AMI:
+    us-east-1:
+      HVM64: ami-0080e4c5bc078760e
+      HVMG2: ami-0aeb704d503081ea6
+    us-west-2:
+      HVM64: ami-01e24be29428c15b2
+      HVMG2: ami-0fe84a5b4563d8f27
+    us-west-1:
+      HVM64: ami-0ec6517f6edbf8044
+      HVMG2: ami-0a7fc72dc0e51aa77
+    eu-west-1:
+      HVM64: ami-08935252a36e25f85
+      HVMG2: ami-0d5299b1c6112c3c7
+    eu-west-2:
+      HVM64: ami-01419b804382064e4
+      HVMG2: NOT_SUPPORTED
+    eu-west-3:
+      HVM64: ami-0dd7e7ed60da8fb83
+      HVMG2: NOT_SUPPORTED
+    eu-central-1:
+      HVM64: ami-0cfbf4f6db41068ac
+      HVMG2: ami-0aa1822e3eb913a11
+    eu-north-1:
+      HVM64: ami-86fe70f8
+      HVMG2: ami-32d55b4c
+    ap-northeast-1:
+      HVM64: ami-00a5245b4816c38e6
+      HVMG2: ami-09d0e0e099ecabba2
+    ap-northeast-2:
+      HVM64: ami-00dc207f8ba6dc919
+      HVMG2: NOT_SUPPORTED
+    ap-northeast-3:
+      HVM64: ami-0b65f69a5c11f3522
+      HVMG2: NOT_SUPPORTED
+    ap-southeast-1:
+      HVM64: ami-05b3bcf7f311194b3
+      HVMG2: ami-0e46ce0d6a87dc979
+    ap-southeast-2:
+      HVM64: ami-02fd0b06f06d93dfc
+      HVMG2: ami-0c0ab057a101d8ff2
+    ap-south-1:
+      HVM64: ami-0ad42f4f66f6c1cc9
+      HVMG2: ami-0244c1d42815af84a
+    us-east-2:
+      HVM64: ami-0cd3dfa4e37921605
+      HVMG2: NOT_SUPPORTED
+    ca-central-1:
+      HVM64: ami-07423fb63ea0a0930
+      HVMG2: NOT_SUPPORTED
+    sa-east-1:
+      HVM64: ami-05145e0b28ad8e0b2
+      HVMG2: NOT_SUPPORTED
+    cn-north-1:
+      HVM64: ami-053617c9d818c1189
+      HVMG2: NOT_SUPPORTED
+    cn-northwest-1:
+      HVM64: ami-0f7937761741dc640
+      HVMG2: NOT_SUPPORTED
+
+# Start of Resources Section
+Resources:
+  EC2CodeDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforAWSCodeDeploy
+      Path: "/"
+      RoleName: EC2CodeDeployRole
+  EC2CodeDeployInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        -
+          !Ref EC2CodeDeployRole
+      InstanceProfileName: EC2CodeDeployInstanceProfile
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Public Subnet (AZ1)
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Ref PublicSubnet2CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Public Subnet (AZ2)
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Private Subnet (AZ1)
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Private Subnet (AZ2)
+
+  NatGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway2EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway2EIP.AllocationId
+      SubnetId: !Ref PublicSubnet2
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Public Routes
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Private Routes (AZ1)
+
+  DefaultPrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Private Routes (AZ2)
+
+  DefaultPrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway2
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      SubnetId: !Ref PrivateSubnet2
+
+  NoIngressSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: no-ingress-sg
+      GroupDescription: Security Group with rules for no incoming traffic
+      VpcId: !Ref VPC
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets: [!Ref PublicSubnet1, !Ref PublicSubnet2]
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId: !Ref VPC
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: true
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: 30
+
+  NodeAppServerGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      #VPCZoneIdentifier: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      VPCZoneIdentifier: [!Ref PublicSubnet1, !Ref PublicSubnet2]
+      LaunchConfigurationName: !Ref LaunchConfig
+      MinSize: 1
+      MaxSize: 5
+      DesiredCapacity: !Ref WebServerCapacity
+      TargetGroupARNs:
+        - !Ref ALBTargetGroup
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT5M
+        Count: !Ref WebServerCapacity
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: PT15M
+        WaitOnResourceSignals: true
+
+  LaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      Comment1: Install a single page website on Apache server
+      Comment2: >-
+        this parts need to be updated to include specific contents of NodeApp
+        env. Currently httpd is being used for checking initial setup of EC2 instances
+      AWS::CloudFormation::Init:
+        config:
+          packages:
+            yum:
+              httpd: []
+          files:
+            /var/www/html/index.html:
+              content: !Join ['', ['<html><body><h1>', 'Congratulations! node app env has been successfully launched using the AWS CloudFormation.', '</h1></body></html>']]
+              mode: '000644'
+              owner: apache
+              group: apache
+            /etc/cfn/cfn-hup.conf:
+              content: !Join
+                - ''
+                - - |
+                    [main]
+                  - stack=
+                  - !Ref 'AWS::StackId'
+                  - |+
+
+                  - region=
+                  - !Ref 'AWS::Region'
+                  - |+
+
+              mode: '000400'
+              owner: root
+              group: root
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+              content: !Join
+                - ''
+                - - |
+                    [cfn-auto-reloader-hook]
+                  - |
+                    triggers=post.update
+                  - >
+                    path=Resources.LaunchConfig.Metadata.AWS::CloudFormation::Init
+                  - 'action=/opt/aws/bin/cfn-init -v '
+                  - '         --stack '
+                  - !Ref 'AWS::StackName'
+                  - '         --resource LaunchConfig '
+                  - '         --region '
+                  - !Ref 'AWS::Region'
+                  - |+
+
+                  - |
+                    runas=root
+              mode: '000400'
+              owner: root
+              group: root
+          services:
+            sysvinit:
+              httpd:
+                enabled: true
+                ensureRunning: true
+              cfn-hup:
+                enabled: true
+                ensureRunning: true
+                files:
+                  - /etc/cfn/cfn-hup.conf
+                  - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+    Properties:
+      ImageId: !FindInMap
+        - AWSRegionArch2AMI
+        - !Ref 'AWS::Region'
+        - !FindInMap
+          - AWSInstanceType2Arch
+          - !Ref InstanceType
+          - Arch
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref EC2CodeDeployInstanceProfile
+      SecurityGroups:
+        - !Ref NodeAppServerSecurityGroup
+      KeyName: !Ref KeyName
+      UserData: !Base64
+        'Fn::Join':
+          - ''
+          - - |
+              #!/bin/bash -xe
+            - |
+              yum update -y
+            - |
+              yum update -y aws-cfn-bootstrap
+            - |
+              yum install -y aws-cli ruby wget jq
+            - |
+              # Install the files and packages from the metadata
+            - '/opt/aws/bin/cfn-init -v '
+            - '         --stack '
+            - !Ref 'AWS::StackName'
+            - '         --resource LaunchConfig '
+            - '         --region '
+            - !Ref 'AWS::Region'
+            - |+
+
+            - |
+              # Signal the status from cfn-init
+            - '/opt/aws/bin/cfn-signal -e $? '
+            - '         --stack '
+            - !Ref 'AWS::StackName'
+            - '         --resource NodeAppServerGroup '
+            - '         --region '
+            - !Ref 'AWS::Region'
+            - |+
+
+            - |
+              # CodeDeployAgent Bootstrap
+            - 'REGION=$(curl -s 169.254.169.254/latest/dynamic/instance-identity/document | jq -r ".region")'
+            - |+
+
+            - 'cd /home/ec2-user'
+            - |+
+
+            - 'wget https://aws-codedeploy-${REGION}.s3.${REGION}.amazonaws.com/latest/install'
+            - |+
+
+            - 'chmod +x ./install'
+            - |+
+
+            - './install auto'
+            - |+
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP access via port 80 for Load Balancer
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref VPC
+
+  NodeAppServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP access via port 80 locked down to the ELB and SSH access
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Select
+            - 0
+            - !GetAtt
+              - ApplicationLoadBalancer
+              - SecurityGroups
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SSHLocation
+      VpcId: !Ref VPC
+
+  BasicDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: SimpleDashboard
+      DashboardBody: '{"widgets":[{"type":"metric","x":0,"y":0,"width":12,"height":6,"properties":{"metrics":[["AWS/EC2","CPUUtilization","InstanceId","i-012345"]],"period":300,"stat":"Average","region":"us-east-1","title":"EC2 Instance CPU"}},{"type":"text","x":0,"y":7,"width":3,"height":3,"properties":{"markdown":"Hello world"}}]}'
+
+
+  DBEC2SecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Open database for access
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '3306'
+          ToPort: '3306'
+          SourceSecurityGroupId: !Ref NodeAppServerSecurityGroup
+      VpcId: !Ref VPC
+
+  NodeappCdnDistribution:
+    Type: 'AWS::CloudFront::Distribution'
+    Properties:
+      DistributionConfig:
+        Origins:
+          - DomainName: !GetAtt 
+              - ApplicationLoadBalancer
+              - DNSName
+            Id: nodeappCustomOrigin
+            CustomOriginConfig:
+              HTTPPort: '80'
+              HTTPSPort: '443'
+              OriginProtocolPolicy: http-only
+        Enabled: 'true'
+        Comment: Node App CDN setup for efficient content distribution / caching
+        DefaultRootObject: index.html
+        Logging:
+          IncludeCookies: 'true'
+          Bucket: devops-codepipeline-deployment.s3.amazonaws.com
+          Prefix: nodeapp_cdn_log
+        DefaultCacheBehavior:
+          TargetOriginId: nodeappCustomOrigin
+          SmoothStreaming: 'false'
+          ForwardedValues:
+            QueryString: 'false'
+            Cookies:
+              Forward: all
+          ViewerProtocolPolicy: allow-all
+        CustomErrorResponses:
+          - ErrorCode: '404'
+            ResponsePagePath: /error-pages/404.html
+            ResponseCode: '200'
+            ErrorCachingMinTTL: '30'
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: 'true'
+  PostgresDatabase:
+    Type: 'AWS::RDS::DBInstance'
+    Properties:
+      Engine: postgres
+      DBName: !Ref DBName
+      MultiAZ: !Ref MultiAZDatabase
+      BackupRetentionPeriod: 30
+      MasterUsername: !Ref DBUser
+      MasterUserPassword: !Ref DBPassword
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref DBAllocatedStorage
+      VPCSecurityGroups:
+        - !GetAtt
+          - DBEC2SecurityGroup
+          - GroupId
+# End of Resources Section
+
+Outputs:
+  WebsiteURL:
+    Description: URL to validate intermediate stage of NodeApp Infra setup
+    Value: !Join
+      - ''
+      - - 'http://'
+        - !GetAtt
+          - ApplicationLoadBalancer
+          - DNSName
+  CdnWebsiteURL:
+    Description: CDN URL to view NodeApp Infra setup
+    Value: !Join 
+      - ''
+      - - 'http://'
+        - !GetAtt 
+          - NodeappCdnDistribution
+          - DomainName
+

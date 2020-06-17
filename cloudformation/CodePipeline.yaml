@@ -1,0 +1,303 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  # Parameters for CodeDeploy - Start
+  TargetInstancesTagKey:
+    Description: Specify Tag Key for target Instances
+    Type: String
+    Default: Name
+  TargetInstancesTagValue:
+    Description: Specify Tag Value for Target Instances
+    Type: String
+    Default: NodeAppCodePipelineDemo
+  CodeDeployAutoScalingGroups:
+    Description: Specify ASG to use for Deploy
+    Type: CommaDelimitedList
+  # Parameters for CodeDeploy - End
+
+  # Parameters for CodePipeline - Start
+  BranchName:
+    Description: CodeCommit branch name
+    Type: String
+    Default: master
+  RepositoryName:
+    Description: CodeComit repository name
+    Type: String
+    Default: NodeAppRepo
+  TheApplicationName:
+    Description: CodeDeploy application name
+    Type: String
+    Default: NodeAppApplication
+  Param1:
+    Description: Param configured in CodeDeploy
+    Type: String
+    Default: Value1
+  # Parameters for CodePipeline - End
+Resources:
+  # Setup CodeCommit Repository - Start
+  # CodeRepository:
+  #  Type: AWS::CodeCommit::Repository
+  #  Properties:
+  #    RepositoryName: NodeAppRepo
+  #    RepositoryDescription: DevOps code repository
+  #    # Triggers may be implemented later to trigger notifications of code updates to Project Team
+  # Setup CodeCommit Repository - End
+
+  # Setup CodeDeploy - Start
+  CodeDeployServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codedeploy.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
+      Path: "/"
+      RoleName: CodeDeployServiceRole
+  NodejsApplication:
+    Type: AWS::CodeDeploy::Application # TODO add Dependency on EC2 instances
+    Properties:
+      ApplicationName: !Ref TheApplicationName
+      ComputePlatform: Server
+  AtLeastThisMuchUp: # not being used
+    Type: AWS::CodeDeploy::DeploymentConfig
+    Properties:
+      MinimumHealthyHosts:
+        Type: "HOST_PERCENT"
+        Value: 50
+  NodejsTestDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref NodejsApplication
+      # TODO will add AutoScalingGroups here; also check DeploymentStyle
+      DeploymentConfigName: CodeDeployDefault.OneAtATime
+      AutoScalingGroups: !Ref CodeDeployAutoScalingGroups
+      # Ec2TagFilters:
+      ServiceRoleArn: !GetAtt
+        - CodeDeployServiceRole
+        - Arn
+  # Setup CodeDeploy - End
+
+  # ========================================================
+
+  # Setup CodePipeline - Start
+  CodePipelineArtifactStoreBucket:
+    Type: 'AWS::S3::Bucket'
+
+  CodePipelineArtifactStoreBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref CodePipelineArtifactStoreBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: DenyUnEncryptedObjectUploads
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource: !Join
+              - ''
+              - - !GetAtt
+                  - CodePipelineArtifactStoreBucket
+                  - Arn
+                - /*
+            Condition:
+              StringNotEquals:
+                's3:x-amz-server-side-encryption': 'aws:kms'
+          - Sid: DenyInsecureConnections
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource: !Join
+              - ''
+              - - !GetAtt
+                  - CodePipelineArtifactStoreBucket
+                  - Arn
+                - /*
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+
+  AmazonCloudWatchEventRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: cwe-pipeline-execution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 'codepipeline:StartPipelineExecution'
+                Resource: !Join
+                  - ''
+                  - - 'arn:aws:codepipeline:'
+                    - !Ref 'AWS::Region'
+                    - ':'
+                    - !Ref 'AWS::AccountId'
+                    - ':'
+                    - !Ref AppPipeline
+
+  AmazonCloudWatchEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - CodeCommit Repository State Change
+        resources:
+          - !Join
+            - ''
+            - - 'arn:aws:codecommit:'
+              - !Ref 'AWS::Region'
+              - ':'
+              - !Ref 'AWS::AccountId'
+              - ':'
+              - !Ref RepositoryName
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - master
+      Targets:
+        - Arn: !Join
+            - ''
+            - - 'arn:aws:codepipeline:'
+              - !Ref 'AWS::Region'
+              - ':'
+              - !Ref 'AWS::AccountId'
+              - ':'
+              - !Ref AppPipeline
+          RoleArn: !GetAtt
+            - AmazonCloudWatchEventRole
+            - Arn
+          Id: codepipeline-AppPipeline
+
+  AppPipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      Name: codecommit-events-pipeline
+      RoleArn: !GetAtt
+        - CodePipelineServiceRole
+        - Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              OutputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                BranchName: !Ref BranchName
+                RepositoryName: !Ref RepositoryName
+                PollForSourceChanges: false
+              RunOrder: 1
+        - Name: Beta
+          Actions:
+            - Name: BetaAction
+              InputArtifacts:
+                - Name: SourceOutput
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CodeDeploy
+              Configuration:
+                ApplicationName: !Ref TheApplicationName
+                DeploymentGroupName: !Ref NodejsTestDeploymentGroup
+              RunOrder: 1
+      ArtifactStore:
+        Type: S3
+        Location: !Ref CodePipelineArtifactStoreBucket
+
+  CodePipelineServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: AWS-CodePipeline-Service-3
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'codecommit:CancelUploadArchive'
+                  - 'codecommit:GetBranch'
+                  - 'codecommit:GetCommit'
+                  - 'codecommit:GetUploadArchiveStatus'
+                  - 'codecommit:UploadArchive'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'codedeploy:CreateDeployment'
+                  - 'codedeploy:GetApplicationRevision'
+                  - 'codedeploy:GetDeployment'
+                  - 'codedeploy:GetDeploymentConfig'
+                  - 'codedeploy:RegisterApplicationRevision'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'codebuild:BatchGetBuilds'
+                  - 'codebuild:StartBuild'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'devicefarm:ListProjects'
+                  - 'devicefarm:ListDevicePools'
+                  - 'devicefarm:GetRun'
+                  - 'devicefarm:GetUpload'
+                  - 'devicefarm:CreateUpload'
+                  - 'devicefarm:ScheduleRun'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                  - 'lambda:ListFunctions'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'iam:PassRole'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'elasticbeanstalk:*'
+                  - 'ec2:*'
+                  - 'elasticloadbalancing:*'
+                  - 'autoscaling:*'
+                  - 'cloudwatch:*'
+                  - 's3:*'
+                  - 'sns:*'
+                  - 'cloudformation:*'
+                  - 'rds:*'
+                  - 'sqs:*'
+                  - 'ecs:*'
+                Resource: '*'
+  # Setup CodePipeline - End

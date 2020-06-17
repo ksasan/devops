@@ -1,0 +1,43 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Resources:
+  BackupRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: CentralBackupRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "backup.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup"
+  BackupVault:
+    Type: "AWS::Backup::BackupVault"
+    Properties:
+      BackupVaultName: "CentralBackupVault"
+
+  BackupPlan:
+    Type: "AWS::Backup::BackupPlan"
+    Properties:
+      BackupPlan:
+        BackupPlanName: "CentralBackupPlan"
+        BackupPlanRule:
+          - RuleName: "DailyBackupsRule"
+            TargetBackupVault: !Ref BackupVault
+            ScheduleExpression: "cron(0 5 ? * * *)"
+
+  BackupSelection:
+    Type: "AWS::Backup::BackupSelection"
+    Properties:
+      BackupSelection:
+        SelectionName: CentralBackupSelection
+        IamRoleArn: !GetAtt BackupRole.Arn
+        ListOfTags:
+          - ConditionType: "STRINGEQUALS"
+            ConditionKey: "BackupThis"
+            ConditionValue: "Daily"
+      BackupPlanId: !Ref BackupPlan
